@@ -58,7 +58,7 @@ pub struct MqttRuntime<
 /// Constants for the internal publish outbox used during module callbacks.
 const OUTBOX_CAPACITY: usize = 8;
 const OUTBOX_TOPIC_SIZE: usize = 128;
-const OUTBOX_PAYLOAD_SIZE: usize = 512;
+const OUTBOX_PAYLOAD_SIZE: usize = 1024;
 
 impl<'a, T, M, const MAX_TOPICS: usize, const BUF_SIZE: usize, const OUTBOX_DEPTH: usize>
     MqttRuntime<'a, T, M, MAX_TOPICS, BUF_SIZE, OUTBOX_DEPTH>
@@ -118,15 +118,13 @@ where
         self.module.on_start(&mut outbox);
         self.drain_outbox(&mut outbox).await?;
 
-        // Initial tick
-        let mut next_tick = self.module.on_tick(&mut outbox);
+        // Initial tick and set deadline for next tick
+        let tick_interval = self.module.on_tick(&mut outbox);
         self.drain_outbox(&mut outbox).await?;
+        let mut tick_deadline = Instant::now() + tick_interval;
 
         // Main event loop
         loop {
-            // Track when tick is due
-            let tick_deadline = Instant::now() + next_tick;
-
             // First, check for incoming publish requests (non-blocking)
             if let Ok(req) = self.publisher_rx.try_receive() {
                 self.client.publish(req.topic, req.payload, req.qos).await?;
@@ -145,16 +143,17 @@ where
             let timer_fut = Timer::after(remaining);
             let poll_fut = self.client.poll();
 
-            // Track if we need immediate publish after message handling
-            let mut needs_publish = false;
-
             match select(poll_fut, timer_fut).await {
                 Either::First(result) => {
                     // Incoming MQTT message or keep-alive handled
                     match result {
                         Ok(Some(MqttEvent::Publish(msg))) => {
                             self.module.on_message(&msg);
-                            needs_publish = self.module.needs_immediate_publish();
+                            // If module needs immediate state publish after command
+                            if self.module.needs_immediate_publish() {
+                                self.module.on_publish(&mut outbox);
+                                self.drain_outbox(&mut outbox).await?;
+                            }
                         }
                         Ok(None) => {
                             // No message, keep-alive was sent, continue
@@ -163,15 +162,12 @@ where
                     }
                 }
                 Either::Second(()) => {
-                    // Tick timer expired - trigger publish
-                    needs_publish = true;
+                    // Tick timer expired - periodic tick for discovery
+                    let interval = self.module.on_tick(&mut outbox);
+                    self.drain_outbox(&mut outbox).await?;
+                    // Set next tick deadline
+                    tick_deadline = Instant::now() + interval;
                 }
-            }
-
-            // If module needs to publish (either from tick or message response)
-            if needs_publish {
-                next_tick = self.module.on_tick(&mut outbox);
-                self.drain_outbox(&mut outbox).await?;
             }
         }
     }

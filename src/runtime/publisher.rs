@@ -152,12 +152,24 @@ impl<const CAPACITY: usize, const TOPIC_SIZE: usize, const PAYLOAD_SIZE: usize> 
         // Try to store the request; silently drop if full or data too large
         let mut topic_str = heapless::String::new();
         if topic_str.push_str(topic).is_err() {
-            return; // Topic too long
+            #[cfg(feature = "esp-println")]
+            esp_println::println!(
+                "outbox: topic too long! topic_len={}, max={}",
+                topic.len(),
+                TOPIC_SIZE
+            );
+            return;
         }
 
         let mut payload_vec = heapless::Vec::new();
         if payload_vec.extend_from_slice(payload).is_err() {
-            return; // Payload too large
+            #[cfg(feature = "esp-println")]
+            esp_println::println!(
+                "outbox: payload too large! payload_len={}, max={}",
+                payload.len(),
+                PAYLOAD_SIZE
+            );
+            return;
         }
 
         let req = OwnedPublishRequest {
@@ -166,6 +178,17 @@ impl<const CAPACITY: usize, const TOPIC_SIZE: usize, const PAYLOAD_SIZE: usize> 
             qos,
         };
 
-        let _ = self.requests.push(req); // Silently drop if full
+        if self.requests.push(req).is_err() {
+            #[cfg(feature = "esp-println")]
+            esp_println::println!("outbox: queue full! capacity={}", CAPACITY);
+        } else {
+            #[cfg(feature = "esp-println")]
+            esp_println::println!(
+                "outbox: added message, topic='{}', payload_len={}, queue_size={}",
+                topic,
+                payload.len(),
+                self.requests.len()
+            );
+        }
     }
 }

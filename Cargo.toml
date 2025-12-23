@@ -1,7 +1,7 @@
 [package]
 name = "myrtio-mqtt"
 description = "MQTT client library for embedded systems"
-version = "0.1.1"
+version = "0.1.2"
 publish = true
 license = "MIT"
 edition = "2024"
@@ -12,11 +12,9 @@ default = []
 v5 = []
 defmt = ["dep:defmt"]
 log = ["dep:log"]
-esp-println = ["dep:esp-println"]
 
 [dependencies]
 log = { version = "0.4", optional = true }
-esp-println = { version = "0.16.1", optional = true, features = ["esp32"] }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embedded-io-async = "0.6.1"

@@ -161,11 +161,18 @@ pub trait MqttModule {
 
     /// Check if the module needs to publish immediately after processing a message.
     ///
-    /// If this returns `true`, `on_tick` will be called immediately after `on_message`.
+    /// If this returns `true`, `on_publish` will be called immediately after `on_message`.
     /// The default implementation returns `false`.
     fn needs_immediate_publish(&self) -> bool {
         false
     }
+
+    /// Called when an immediate publish is needed (e.g., after receiving a command).
+    ///
+    /// Use this to publish state updates in response to commands.
+    /// Unlike `on_tick`, this should NOT re-announce discovery configs.
+    /// The default implementation does nothing.
+    fn on_publish(&mut self, _outbox: &mut dyn PublishOutbox) {}
 }
 
 /// A no-op module that does nothing.
@@ -235,6 +242,11 @@ where
     fn needs_immediate_publish(&self) -> bool {
         self.first.needs_immediate_publish() || self.second.needs_immediate_publish()
     }
+
+    fn on_publish(&mut self, outbox: &mut dyn PublishOutbox) {
+        self.first.on_publish(outbox);
+        self.second.on_publish(outbox);
+    }
 }
 
 /// Blanket implementation for mutable references to trait objects.
@@ -259,5 +271,9 @@ impl<M: MqttModule + ?Sized> MqttModule for &mut M {
 
     fn needs_immediate_publish(&self) -> bool {
         (**self).needs_immediate_publish()
+    }
+
+    fn on_publish(&mut self, outbox: &mut dyn PublishOutbox) {
+        (**self).on_publish(outbox)
     }
 }
