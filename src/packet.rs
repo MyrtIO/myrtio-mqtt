@@ -249,6 +249,10 @@ impl<'a> DecodePacket<'a> for ConnAck<'a> {
 pub struct Publish<'a> {
     pub topic: &'a str,
     pub qos: QoS,
+    /// MQTT retain flag. When set, the broker stores the last message on this topic.
+    ///
+    /// Home Assistant MQTT discovery expects config publishes to be retained.
+    pub retain: bool,
     pub payload: &'a [u8],
     pub packet_id: Option<u16>,
     #[cfg(feature = "v5")]
@@ -260,6 +264,7 @@ impl<'a> DecodePacket<'a> for Publish<'a> {
         _version: MqttVersion,
     ) -> Result<Self, MqttError<transport::ErrorPlaceHolder>> {
         let flags = buf[0] & 0x0F;
+        let retain = (flags & 0x01) != 0;
         let qos = match (flags >> 1) & 0x03 {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
@@ -292,6 +297,7 @@ impl<'a> DecodePacket<'a> for Publish<'a> {
         Ok(Publish {
             topic,
             qos,
+            retain,
             payload,
             packet_id,
             #[cfg(feature = "v5")]
@@ -307,8 +313,9 @@ impl<'a> EncodePacket for Publish<'a> {
     ) -> Result<usize, MqttError<transport::ErrorPlaceHolder>> {
         let mut cursor = 0;
 
-        // Fixed header: PUBLISH packet type (3) with QoS flags
-        let flags = (self.qos as u8) << 1;
+        // Fixed header: PUBLISH packet type (3) with QoS + retain flags
+        let retain_flag = u8::from(self.retain);
+        let flags = ((self.qos as u8) << 1) | retain_flag;
         buf[cursor] = 0x30 | flags;
         cursor += 1;
 

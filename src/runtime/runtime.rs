@@ -122,8 +122,17 @@ where
             BufferedOutbox::new();
 
         // Call on_start for initial setup
+        #[cfg(feature = "esp32-log")]
+        esp_println::println!("mqtt-runtime: calling on_start()");
         self.module.on_start(&mut outbox);
+        #[cfg(feature = "esp32-log")]
+        esp_println::println!(
+            "mqtt-runtime: on_start() done, outbox has {} messages",
+            outbox.len()
+        );
         self.drain_outbox(&mut outbox).await?;
+        #[cfg(feature = "esp32-log")]
+        esp_println::println!("mqtt-runtime: on_start outbox drained");
 
         // Initial tick
         let mut next_tick = self.module.on_tick(&mut outbox);
@@ -136,7 +145,9 @@ where
 
             // First, check for incoming publish requests (non-blocking)
             if let Ok(req) = self.publisher_rx.try_receive() {
-                self.client.publish(req.topic, req.payload, req.qos).await?;
+                self.client
+                    .publish_with_retain(req.topic, req.payload, req.qos, req.retain)
+                    .await?;
                 continue;
             }
 
@@ -188,11 +199,26 @@ where
         &mut self,
         outbox: &mut BufferedOutbox<OUTBOX_CAPACITY, OUTBOX_TOPIC_SIZE, OUTBOX_PAYLOAD_SIZE>,
     ) -> Result<(), MqttError<T::Error>> {
+        #[cfg(feature = "esp32-log")]
+        let mut published_count = 0usize;
         for req in outbox.drain() {
+            #[cfg(feature = "esp32-log")]
+            esp_println::println!(
+                "mqtt-runtime: publishing to '{}' (retain={}, payload_len={})",
+                req.topic.as_str(),
+                req.retain,
+                req.payload.len()
+            );
             self.client
-                .publish(req.topic.as_str(), req.payload.as_slice(), req.qos)
+                .publish_with_retain(req.topic.as_str(), req.payload.as_slice(), req.qos, req.retain)
                 .await?;
+            #[cfg(feature = "esp32-log")]
+            {
+                published_count += 1;
+            }
         }
+        #[cfg(feature = "esp32-log")]
+        esp_println::println!("mqtt-runtime: published {} messages", published_count);
         outbox.clear();
         Ok(())
     }

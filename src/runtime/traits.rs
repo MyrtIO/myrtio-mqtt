@@ -52,6 +52,15 @@ pub trait PublishOutbox {
     /// - `payload`: The message payload bytes
     /// - `qos`: Quality of Service level
     fn publish(&mut self, topic: &str, payload: &[u8], qos: QoS);
+
+    /// Queue a message for publishing with the MQTT retain flag.
+    ///
+    /// Default implementation calls [`PublishOutbox::publish`] and ignores `retain`.
+    /// Implementations that support retain should override this.
+    #[allow(unused_variables)]
+    fn publish_with_retain(&mut self, topic: &str, payload: &[u8], qos: QoS, retain: bool) {
+        self.publish(topic, payload, qos);
+    }
 }
 
 /// Object-safe trait for collecting topics during registration.

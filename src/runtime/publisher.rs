@@ -22,6 +22,8 @@ pub struct PublishRequest<'a> {
     pub payload: &'a [u8],
     /// Quality of Service level
     pub qos: QoS,
+    /// MQTT retain flag
+    pub retain: bool,
 }
 
 pub type PublishRequestChannel<'a, const OUTBOX_DEPTH: usize> =
@@ -58,6 +60,24 @@ impl<'a, const OUTBOX_DEPTH: usize> PublisherHandle<'a, OUTBOX_DEPTH> {
             topic,
             payload,
             qos,
+            retain: false,
+        };
+        self.tx.send(req).await;
+    }
+
+    /// Publish a message asynchronously, with explicit retain flag.
+    pub async fn publish_with_retain(
+        &self,
+        topic: &'a str,
+        payload: &'a [u8],
+        qos: QoS,
+        retain: bool,
+    ) {
+        let req = PublishRequest {
+            topic,
+            payload,
+            qos,
+            retain,
         };
         self.tx.send(req).await;
     }
@@ -70,6 +90,26 @@ impl<'a, const OUTBOX_DEPTH: usize> PublisherHandle<'a, OUTBOX_DEPTH> {
             topic,
             payload,
             qos,
+            retain: false,
+        };
+        self.tx.try_send(req).is_ok()
+    }
+
+    /// Try to publish a message without waiting, with explicit retain flag.
+    ///
+    /// Returns `false` if the channel is full.
+    pub fn try_publish_with_retain(
+        &self,
+        topic: &'a str,
+        payload: &'a [u8],
+        qos: QoS,
+        retain: bool,
+    ) -> bool {
+        let req = PublishRequest {
+            topic,
+            payload,
+            qos,
+            retain,
         };
         self.tx.try_send(req).is_ok()
     }
@@ -102,6 +142,8 @@ pub struct OwnedPublishRequest<const TOPIC_SIZE: usize, const PAYLOAD_SIZE: usiz
     pub payload: heapless::Vec<u8, PAYLOAD_SIZE>,
     /// Quality of Service level
     pub qos: QoS,
+    /// MQTT retain flag
+    pub retain: bool,
 }
 
 impl<const CAPACITY: usize, const TOPIC_SIZE: usize, const PAYLOAD_SIZE: usize>
@@ -149,10 +191,14 @@ impl<const CAPACITY: usize, const TOPIC_SIZE: usize, const PAYLOAD_SIZE: usize> 
     for BufferedOutbox<CAPACITY, TOPIC_SIZE, PAYLOAD_SIZE>
 {
     fn publish(&mut self, topic: &str, payload: &[u8], qos: QoS) {
+        self.publish_with_retain(topic, payload, qos, false);
+    }
+
+    fn publish_with_retain(&mut self, topic: &str, payload: &[u8], qos: QoS, retain: bool) {
         // Try to store the request; silently drop if full or data too large
         let mut topic_str = heapless::String::new();
         if topic_str.push_str(topic).is_err() {
-            #[cfg(feature = "esp-println")]
+            #[cfg(feature = "esp32-log")]
             esp_println::println!(
                 "outbox: topic too long! topic_len={}, max={}",
                 topic.len(),
@@ -163,7 +209,7 @@ impl<const CAPACITY: usize, const TOPIC_SIZE: usize, const PAYLOAD_SIZE: usize> 
 
         let mut payload_vec = heapless::Vec::new();
         if payload_vec.extend_from_slice(payload).is_err() {
-            #[cfg(feature = "esp-println")]
+            #[cfg(feature = "esp32-log")]
             esp_println::println!(
                 "outbox: payload too large! payload_len={}, max={}",
                 payload.len(),
@@ -176,16 +222,18 @@ impl<const CAPACITY: usize, const TOPIC_SIZE: usize, const PAYLOAD_SIZE: usize> 
             topic: topic_str,
             payload: payload_vec,
             qos,
+            retain,
         };
 
         if self.requests.push(req).is_err() {
-            #[cfg(feature = "esp-println")]
+            #[cfg(feature = "esp32-log")]
             esp_println::println!("outbox: queue full! capacity={}", CAPACITY);
         } else {
-            #[cfg(feature = "esp-println")]
+            #[cfg(feature = "esp32-log")]
             esp_println::println!(
-                "outbox: added message, topic='{}', payload_len={}, queue_size={}",
+                "outbox: added message, topic='{}', retain={}, payload_len={}, queue_size={}",
                 topic,
+                retain,
                 payload.len(),
                 self.requests.len()
             );

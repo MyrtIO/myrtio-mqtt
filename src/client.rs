@@ -86,7 +86,7 @@ where
     where
         T::Error: transport::TransportError,
     {
-        #[cfg(feature = "esp-println")]
+        #[cfg(feature = "esp32-log")]
         esp_println::println!("MQTT: Starting connect...");
 
         self.state = ConnectionState::Connecting;
@@ -99,22 +99,22 @@ where
             .encode(&mut self.tx_buffer, self.options.version)
             .map_err(MqttError::cast_transport_error)?;
 
-        #[cfg(feature = "esp-println")]
+        #[cfg(feature = "esp32-log")]
         esp_println::println!("MQTT TX ({} bytes): {:02X?}", len, &self.tx_buffer[..len]);
 
         self.transport.send(&self.tx_buffer[..len]).await?;
 
-        #[cfg(feature = "esp-println")]
+        #[cfg(feature = "esp32-log")]
         esp_println::println!("MQTT: Waiting for CONNACK...");
 
         let n = self.transport.recv(&mut self.rx_buffer).await?;
 
-        #[cfg(feature = "esp-println")]
+        #[cfg(feature = "esp32-log")]
         esp_println::println!("MQTT RX ({} bytes): {:02X?}", n, &self.rx_buffer[..n]);
 
         let packet = packet::decode::<T::Error>(&self.rx_buffer[..n], self.options.version);
 
-        #[cfg(feature = "esp-println")]
+        #[cfg(feature = "esp32-log")]
         if let Err(ref e) = packet {
             esp_println::println!("MQTT decode error: {:?}", e);
         }
@@ -122,7 +122,7 @@ where
         let packet = packet?.ok_or(MqttError::Protocol(ProtocolError::InvalidResponse))?;
 
         if let MqttPacket::ConnAck(connack) = packet {
-            #[cfg(feature = "esp-println")]
+            #[cfg(feature = "esp32-log")]
             esp_println::println!(
                 "MQTT CONNACK: reason_code={}, session_present={}",
                 connack.reason_code,
@@ -138,7 +138,7 @@ where
                 Err(MqttError::ConnectionRefused(connack.reason_code.into()))
             }
         } else {
-            #[cfg(feature = "esp-println")]
+            #[cfg(feature = "esp32-log")]
             esp_println::println!("MQTT: Expected CONNACK, got different packet!");
 
             self.state = ConnectionState::Disconnected;
@@ -156,6 +156,20 @@ where
     where
         T::Error: transport::TransportError,
     {
+        self.publish_with_retain(topic, payload, qos, false).await
+    }
+
+    /// Publishes a message to a topic, with explicit retain flag.
+    pub async fn publish_with_retain(
+        &mut self,
+        topic: &str,
+        payload: &[u8],
+        qos: QoS,
+        retain: bool,
+    ) -> Result<(), MqttError<T::Error>>
+    where
+        T::Error: transport::TransportError,
+    {
         if self.state != ConnectionState::Connected {
             return Err(MqttError::NotConnected);
         }
@@ -169,6 +183,7 @@ where
         let publish = Publish {
             topic,
             qos,
+            retain,
             payload,
             packet_id,
             #[cfg(feature = "v5")]
@@ -303,10 +318,10 @@ where
                 Ok(None)
             }
             PollDecision::KeepAlive => {
-                #[cfg(feature = "esp-println")]
+                #[cfg(feature = "esp32-log")]
                 esp_println::println!("MQTT: Sending PINGREQ");
                 self._send_packet(PingReq).await?;
-                #[cfg(feature = "esp-println")]
+                #[cfg(feature = "esp32-log")]
                 esp_println::println!("MQTT: PINGREQ sent");
                 Ok(None)
             }

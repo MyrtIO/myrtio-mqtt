@@ -127,7 +127,9 @@ where
         loop {
             // First, check for incoming publish requests (non-blocking)
             if let Ok(req) = self.publisher_rx.try_receive() {
-                self.client.publish(req.topic, req.payload, req.qos).await?;
+                self.client
+                    .publish_with_retain(req.topic, req.payload, req.qos, req.retain)
+                    .await?;
                 continue;
             }
 
@@ -179,7 +181,7 @@ where
     ) -> Result<(), MqttError<T::Error>> {
         for req in outbox.drain() {
             self.client
-                .publish(req.topic.as_str(), req.payload.as_slice(), req.qos)
+                .publish_with_retain(req.topic.as_str(), req.payload.as_slice(), req.qos, req.retain)
                 .await?;
         }
         outbox.clear();
