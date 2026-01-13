@@ -7,6 +7,7 @@ use crate::error::{MqttError, ProtocolError};
 use crate::packet::{self, Connect, EncodePacket, MqttPacket, PingReq, Publish, QoS, Subscribe};
 use crate::transport::{self, MqttTransport};
 use embassy_time::{Duration, Instant, Timer};
+use heapless::String;
 
 /// Represents the MQTT protocol version used by the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,8 @@ pub struct MqttOptions<'a> {
     client_id: &'a str,
     version: MqttVersion,
     keep_alive: Duration,
+    username: Option<String<32>>,
+    password: Option<String<64>>,
 }
 
 impl<'a> MqttOptions<'a> {
@@ -29,6 +32,8 @@ impl<'a> MqttOptions<'a> {
             client_id,
             version: MqttVersion::V3,
             keep_alive: Duration::from_secs(60),
+            username: None,
+            password: None,
         }
     }
     #[cfg(feature = "v5")]
@@ -38,6 +43,14 @@ impl<'a> MqttOptions<'a> {
     }
     pub fn with_keep_alive(mut self, keep_alive: Duration) -> Self {
         self.keep_alive = keep_alive;
+        self
+    }
+    /// Sets the username and password for MQTT broker authentication.
+    ///
+    /// Username is limited to 32 bytes, password to 64 bytes.
+    pub fn with_credentials(mut self, username: &str, password: &str) -> Self {
+        self.username = String::try_from(username).ok();
+        self.password = String::try_from(password).ok();
         self
     }
 }
@@ -90,10 +103,12 @@ where
         esp_println::println!("MQTT: Starting connect...");
 
         self.state = ConnectionState::Connecting;
-        let connect_packet = Connect::new(
+        let connect_packet = Connect::with_credentials(
             self.options.client_id,
             self.options.keep_alive.as_secs() as u16,
             true,
+            self.options.username.as_deref(),
+            self.options.password.as_ref().map(|s| s.as_bytes()),
         );
         let len = connect_packet
             .encode(&mut self.tx_buffer, self.options.version)

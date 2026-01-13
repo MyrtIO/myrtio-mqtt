@@ -116,10 +116,10 @@ pub struct Connect<'a> {
     pub clean_session: bool,
     pub keep_alive: u16,
     pub client_id: &'a str,
+    pub username: Option<&'a str>,
+    pub password: Option<&'a [u8]>,
     #[cfg(feature = "v5")]
     pub properties: Vec<Property<'a>, 8>,
-    #[cfg(not(feature = "v5"))]
-    _phantom: PhantomData<&'a ()>,
 }
 
 impl<'a> Connect<'a> {
@@ -128,16 +128,34 @@ impl<'a> Connect<'a> {
             client_id,
             keep_alive,
             clean_session,
+            username: None,
+            password: None,
             #[cfg(feature = "v5")]
             properties: Vec::new(),
-            #[cfg(not(feature = "v5"))]
-            _phantom: PhantomData,
+        }
+    }
+
+    /// Creates a new Connect packet with authentication credentials.
+    pub fn with_credentials(
+        client_id: &'a str,
+        keep_alive: u16,
+        clean_session: bool,
+        username: Option<&'a str>,
+        password: Option<&'a [u8]>,
+    ) -> Self {
+        Self {
+            client_id,
+            keep_alive,
+            clean_session,
+            username,
+            password,
+            #[cfg(feature = "v5")]
+            properties: Vec::new(),
         }
     }
 }
 
 impl<'a> EncodePacket for Connect<'a> {
-    // ... (implementation as before)
     fn encode(
         &self,
         buf: &mut [u8],
@@ -154,19 +172,53 @@ impl<'a> EncodePacket for Connect<'a> {
         // Protocol level: 4 for MQTT 3.1.1, 5 for MQTT 5.0
         buf[cursor] = if version == MqttVersion::V5 { 5 } else { 4 };
         cursor += 1;
-        let mut flags = 0;
+
+        // Build connect flags
+        let mut flags = 0u8;
         if self.clean_session {
-            flags |= 0x02;
+            flags |= 0x02; // Clean Session flag (bit 1)
+        }
+        if self.username.is_some() {
+            flags |= 0x80; // Username flag (bit 7)
+        }
+        if self.password.is_some() {
+            flags |= 0x40; // Password flag (bit 6)
         }
         buf[cursor] = flags;
+        let flags_pos = cursor; // Save position to update flags later if needed
+        let _ = flags_pos; // Suppress unused warning
         cursor += 1;
+
         buf[cursor..cursor + 2].copy_from_slice(&self.keep_alive.to_be_bytes());
         cursor += 2;
         #[cfg(feature = "v5")]
         if version == MqttVersion::V5 {
             write_properties(&mut cursor, buf, &self.properties)?;
         }
+
+        // Payload: Client ID
         cursor += write_utf8_string(&mut buf[cursor..], self.client_id)?;
+
+        // Payload: Username (if present)
+        if let Some(username) = self.username {
+            cursor += write_utf8_string(&mut buf[cursor..], username)?;
+        }
+
+        // Payload: Password (if present) - written as binary data (2-byte length + data)
+        if let Some(password) = self.password {
+            let len = password.len();
+            if len > u16::MAX as usize {
+                return Err(MqttError::Protocol(ProtocolError::PayloadTooLarge));
+            }
+            if cursor + 2 + len > buf.len() {
+                return Err(MqttError::BufferTooSmall);
+            }
+            buf[cursor..cursor + 2].copy_from_slice(&(len as u16).to_be_bytes());
+            cursor += 2;
+            buf[cursor..cursor + len].copy_from_slice(password);
+            cursor += len;
+        }
+
         let remaining_len = cursor - content_start;
         let len_bytes =
             util::write_variable_byte_integer_len(&mut buf[remaining_len_pos..], remaining_len)?;
@@ -176,7 +228,6 @@ impl<'a> EncodePacket for Connect<'a> {
     }
 }
 impl<'a> DecodePacket<'a> for Connect<'a> {
-    // ... (implementation as before)
     fn decode(
         buf: &'a [u8],
         _version: MqttVersion,
@@ -185,24 +236,41 @@ impl<'a> DecodePacket<'a> for Connect<'a> {
         cursor += 6;
         let connect_flags = buf[cursor];
         let clean_session = (connect_flags & 0x02) != 0;
+        let has_username = (connect_flags & 0x80) != 0;
+        let has_password = (connect_flags & 0x40) != 0;
         cursor += 1;
         let keep_alive = u16::from_be_bytes([buf[cursor], buf[cursor + 1]]);
         cursor += 2;
         #[cfg(feature = "v5")]
-        let properties = if version == MqttVersion::V5 {
+        let properties = if _version == MqttVersion::V5 {
             read_properties(&mut cursor, buf)?
         } else {
             Vec::new()
         };
         let client_id = read_utf8_string(&mut cursor, buf)?;
+        // Note: Will topic/message parsing would go here if supported
+        let username = if has_username {
+            Some(read_utf8_string(&mut cursor, buf)?)
+        } else {
+            None
+        };
+        let password = if has_password {
+            let len = u16::from_be_bytes([buf[cursor], buf[cursor + 1]]) as usize;
+            cursor += 2;
+            let pwd = &buf[cursor..cursor + len];
+            cursor += len;
+            Some(pwd)
+        } else {
+            None
+        };
         Ok(Self {
             clean_session,
             keep_alive,
             client_id,
+            username,
+            password,
             #[cfg(feature = "v5")]
             properties,
-            #[cfg(not(feature = "v5"))]
-            _phantom: PhantomData,
         })
     }
 }
