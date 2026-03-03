@@ -181,7 +181,12 @@ where
     ) -> Result<(), MqttError<T::Error>> {
         for req in outbox.drain() {
             self.client
-                .publish_with_retain(req.topic.as_str(), req.payload.as_slice(), req.qos, req.retain)
+                .publish_with_retain(
+                    req.topic.as_str(),
+                    req.payload.as_slice(),
+                    req.qos,
+                    req.retain,
+                )
                 .await?;
         }
         outbox.clear();

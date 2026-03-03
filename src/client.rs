@@ -55,6 +55,10 @@ impl<'a> MqttOptions<'a> {
     }
 }
 
+/// Maximum number of receive attempts when waiting for PUBACK/SUBACK.
+/// Skips interleaved packets (PingResp, Publish). Prevents infinite loop on broken connection.
+const MAX_RECV_ATTEMPTS: usize = 16;
+
 /// Represents the current connection state of the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -211,14 +215,22 @@ where
         self.transport.send(&self.tx_buffer[..len]).await?;
         self.last_tx_time = Instant::now();
 
-        // Wait for PUBACK if QoS > 0
+        // Wait for PUBACK if QoS > 0; skip interleaved PingResp/Publish to avoid race with keep-alive
         if qos != QoS::AtMostOnce {
-            let n = self.transport.recv(&mut self.rx_buffer).await?;
-            let packet = packet::decode::<T::Error>(&self.rx_buffer[..n], self.options.version)?
-                .ok_or(MqttError::Protocol(ProtocolError::InvalidResponse))?;
-            if !matches!(packet, MqttPacket::PubAck(_)) {
-                return Err(MqttError::Protocol(ProtocolError::InvalidResponse));
+            for _ in 0..MAX_RECV_ATTEMPTS {
+                let n = self.transport.recv(&mut self.rx_buffer).await?;
+                let packet =
+                    packet::decode::<T::Error>(&self.rx_buffer[..n], self.options.version)?
+                        .ok_or(MqttError::Protocol(ProtocolError::InvalidResponse))?;
+
+                match packet {
+                    MqttPacket::PubAck(_) => return Ok(()),
+                    MqttPacket::PingResp => continue,
+                    MqttPacket::Publish(_) => continue,
+                    _ => return Err(MqttError::Protocol(ProtocolError::InvalidResponse)),
+                }
             }
+            return Err(MqttError::Protocol(ProtocolError::InvalidResponse));
         }
 
         Ok(())
@@ -242,28 +254,33 @@ where
         self.transport.send(&self.tx_buffer[..len]).await?;
         self.last_tx_time = Instant::now();
 
-        // Wait for SUBACK
-        let n = self.transport.recv(&mut self.rx_buffer).await?;
-        let packet = packet::decode::<T::Error>(&self.rx_buffer[..n], self.options.version)?
-            .ok_or(MqttError::Protocol(ProtocolError::InvalidResponse))?;
+        // Wait for SUBACK; skip interleaved PingResp/Publish to avoid race with keep-alive
+        for _ in 0..MAX_RECV_ATTEMPTS {
+            let n = self.transport.recv(&mut self.rx_buffer).await?;
+            let packet = packet::decode::<T::Error>(&self.rx_buffer[..n], self.options.version)?
+                .ok_or(MqttError::Protocol(ProtocolError::InvalidResponse))?;
 
-        if let MqttPacket::SubAck(suback) = packet {
-            if suback.packet_id != packet_id {
-                return Err(MqttError::Protocol(ProtocolError::InvalidResponse));
+            match packet {
+                MqttPacket::SubAck(suback) => {
+                    if suback.packet_id != packet_id {
+                        return Err(MqttError::Protocol(ProtocolError::InvalidResponse));
+                    }
+                    if suback
+                        .reason_codes
+                        .first()
+                        .map(|&c| c >= 0x80)
+                        .unwrap_or(true)
+                    {
+                        return Err(MqttError::Protocol(ProtocolError::InvalidResponse));
+                    }
+                    return Ok(());
+                }
+                MqttPacket::PingResp => continue,
+                MqttPacket::Publish(_) => continue,
+                _ => return Err(MqttError::Protocol(ProtocolError::InvalidResponse)),
             }
-            // Check if subscription was successful (reason code < 0x80)
-            if suback
-                .reason_codes
-                .first()
-                .map(|&c| c >= 0x80)
-                .unwrap_or(true)
-            {
-                return Err(MqttError::Protocol(ProtocolError::InvalidResponse));
-            }
-            Ok(())
-        } else {
-            Err(MqttError::Protocol(ProtocolError::InvalidResponse))
         }
+        Err(MqttError::Protocol(ProtocolError::InvalidResponse))
     }
 
     /// Sends a pre-constructed packet over the transport.
