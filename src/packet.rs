@@ -4,7 +4,7 @@
 //! decoding them to and from a byte buffer. It supports both MQTT v3.1.1 and v5
 //! through conditional compilation.
 
-use crate::client::MqttVersion;
+use crate::client::{LastWill, MqttVersion};
 use crate::error::{MqttError, ProtocolError};
 use crate::transport;
 use crate::util::{self, read_utf8_string, write_utf8_string};
@@ -118,6 +118,7 @@ pub struct Connect<'a> {
     pub client_id: &'a str,
     pub username: Option<&'a str>,
     pub password: Option<&'a [u8]>,
+    pub will: Option<LastWill<'a>>,
     #[cfg(feature = "v5")]
     pub properties: Vec<Property<'a>, 8>,
 }
@@ -130,6 +131,7 @@ impl<'a> Connect<'a> {
             clean_session,
             username: None,
             password: None,
+            will: None,
             #[cfg(feature = "v5")]
             properties: Vec::new(),
         }
@@ -142,6 +144,7 @@ impl<'a> Connect<'a> {
         clean_session: bool,
         username: Option<&'a str>,
         password: Option<&'a [u8]>,
+        will: Option<LastWill<'a>>,
     ) -> Self {
         Self {
             client_id,
@@ -149,6 +152,7 @@ impl<'a> Connect<'a> {
             clean_session,
             username,
             password,
+            will,
             #[cfg(feature = "v5")]
             properties: Vec::new(),
         }
@@ -178,6 +182,13 @@ impl<'a> EncodePacket for Connect<'a> {
         if self.clean_session {
             flags |= 0x02; // Clean Session flag (bit 1)
         }
+        if let Some(will) = self.will {
+            flags |= 0x04; // Will Flag (bit 2)
+            flags |= (will.qos as u8) << 3; // Will QoS (bits 3-4)
+            if will.retain {
+                flags |= 0x20; // Will Retain (bit 5)
+            }
+        }
         if self.username.is_some() {
             flags |= 0x80; // Username flag (bit 7)
         }
@@ -199,6 +210,12 @@ impl<'a> EncodePacket for Connect<'a> {
         // Payload: Client ID
         cursor += write_utf8_string(&mut buf[cursor..], self.client_id)?;
 
+        // Payload: Will topic and payload (if present)
+        if let Some(will) = self.will {
+            cursor += write_utf8_string(&mut buf[cursor..], will.topic)?;
+            cursor += write_binary_data(&mut buf[cursor..], will.payload)?;
+        }
+
         // Payload: Username (if present)
         if let Some(username) = self.username {
             cursor += write_utf8_string(&mut buf[cursor..], username)?;
@@ -206,17 +223,7 @@ impl<'a> EncodePacket for Connect<'a> {
 
         // Payload: Password (if present) - written as binary data (2-byte length + data)
         if let Some(password) = self.password {
-            let len = password.len();
-            if len > u16::MAX as usize {
-                return Err(MqttError::Protocol(ProtocolError::PayloadTooLarge));
-            }
-            if cursor + 2 + len > buf.len() {
-                return Err(MqttError::BufferTooSmall);
-            }
-            buf[cursor..cursor + 2].copy_from_slice(&(len as u16).to_be_bytes());
-            cursor += 2;
-            buf[cursor..cursor + len].copy_from_slice(password);
-            cursor += len;
+            cursor += write_binary_data(&mut buf[cursor..], password)?;
         }
 
         let remaining_len = cursor - content_start;
@@ -236,6 +243,8 @@ impl<'a> DecodePacket<'a> for Connect<'a> {
         cursor += 6;
         let connect_flags = buf[cursor];
         let clean_session = (connect_flags & 0x02) != 0;
+        let has_will = (connect_flags & 0x04) != 0;
+        let will_retain = (connect_flags & 0x20) != 0;
         let has_username = (connect_flags & 0x80) != 0;
         let has_password = (connect_flags & 0x40) != 0;
         cursor += 1;
@@ -248,7 +257,34 @@ impl<'a> DecodePacket<'a> for Connect<'a> {
             Vec::new()
         };
         let client_id = read_utf8_string(&mut cursor, buf)?;
-        // Note: Will topic/message parsing would go here if supported
+        let will = if has_will {
+            let will_qos = match (connect_flags >> 3) & 0x03 {
+                0 => QoS::AtMostOnce,
+                1 => QoS::AtLeastOnce,
+                2 => QoS::ExactlyOnce,
+                _ => return Err(MqttError::Protocol(ProtocolError::MalformedPacket)),
+            };
+            let will_topic = read_utf8_string(&mut cursor, buf)?;
+            if cursor + 2 > buf.len() {
+                return Err(MqttError::Protocol(ProtocolError::MalformedPacket));
+            }
+            let len = u16::from_be_bytes([buf[cursor], buf[cursor + 1]]) as usize;
+            cursor += 2;
+            if cursor + len > buf.len() {
+                return Err(MqttError::Protocol(ProtocolError::MalformedPacket));
+            }
+            let will_payload = &buf[cursor..cursor + len];
+            cursor += len;
+
+            Some(LastWill {
+                topic: will_topic,
+                payload: will_payload,
+                qos: will_qos,
+                retain: will_retain,
+            })
+        } else {
+            None
+        };
         let username = if has_username {
             Some(read_utf8_string(&mut cursor, buf)?)
         } else {
@@ -258,7 +294,6 @@ impl<'a> DecodePacket<'a> for Connect<'a> {
             let len = u16::from_be_bytes([buf[cursor], buf[cursor + 1]]) as usize;
             cursor += 2;
             let pwd = &buf[cursor..cursor + len];
-            cursor += len;
             Some(pwd)
         } else {
             None
@@ -269,10 +304,28 @@ impl<'a> DecodePacket<'a> for Connect<'a> {
             client_id,
             username,
             password,
+            will,
             #[cfg(feature = "v5")]
             properties,
         })
     }
+}
+
+fn write_binary_data(
+    buf: &mut [u8],
+    data: &[u8],
+) -> Result<usize, MqttError<transport::ErrorPlaceHolder>> {
+    let len = data.len();
+    if len > u16::MAX as usize {
+        return Err(MqttError::Protocol(ProtocolError::PayloadTooLarge));
+    }
+    if 2 + len > buf.len() {
+        return Err(MqttError::BufferTooSmall);
+    }
+
+    buf[..2].copy_from_slice(&(len as u16).to_be_bytes());
+    buf[2..2 + len].copy_from_slice(data);
+    Ok(2 + len)
 }
 
 // --- CONNACK Packet ---

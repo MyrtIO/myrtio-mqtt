@@ -7,7 +7,7 @@ use crate::error::{MqttError, ProtocolError};
 use crate::packet::{self, Connect, EncodePacket, MqttPacket, PingReq, Publish, QoS, Subscribe};
 use crate::transport::{self, MqttTransport};
 use embassy_time::{Duration, Instant, Timer};
-use heapless::String;
+use heapless::{String, Vec};
 
 /// Represents the MQTT protocol version used by the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,20 @@ pub enum MqttVersion {
     V5,
 }
 
+/// Last Will and Testament configuration for MQTT CONNECT.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct LastWill<'a> {
+    /// Topic the broker will publish to when the client disconnects unexpectedly.
+    pub topic: &'a str,
+    /// Payload the broker will publish on unexpected disconnect.
+    pub payload: &'a [u8],
+    /// QoS for the will publish.
+    pub qos: QoS,
+    /// Retain flag for the will publish.
+    pub retain: bool,
+}
+
 /// Configuration options for the `MqttClient`.
 pub struct MqttOptions<'a> {
     client_id: &'a str,
@@ -24,6 +38,7 @@ pub struct MqttOptions<'a> {
     keep_alive: Duration,
     username: Option<String<32>>,
     password: Option<String<64>>,
+    will: Option<LastWill<'a>>,
 }
 
 impl<'a> MqttOptions<'a> {
@@ -34,6 +49,7 @@ impl<'a> MqttOptions<'a> {
             keep_alive: Duration::from_secs(60),
             username: None,
             password: None,
+            will: None,
         }
     }
     #[cfg(feature = "v5")]
@@ -53,11 +69,29 @@ impl<'a> MqttOptions<'a> {
         self.password = String::try_from(password).ok();
         self
     }
+
+    /// Sets the MQTT Last Will and Testament message.
+    pub fn with_last_will(mut self, will: LastWill<'a>) -> Self {
+        self.will = Some(will);
+        self
+    }
 }
 
 /// Maximum number of receive attempts when waiting for PUBACK/SUBACK.
 /// Skips interleaved packets (PingResp, Publish). Prevents infinite loop on broken connection.
 const MAX_RECV_ATTEMPTS: usize = 16;
+/// Maximum topic length for runtime-provided Last Will messages.
+const MAX_WILL_TOPIC_LEN: usize = 128;
+/// Maximum payload length for runtime-provided Last Will messages.
+const MAX_WILL_PAYLOAD_LEN: usize = 256;
+
+/// Owned storage for a runtime-provided Last Will message.
+struct OwnedLastWill {
+    topic: String<MAX_WILL_TOPIC_LEN>,
+    payload: Vec<u8, MAX_WILL_PAYLOAD_LEN>,
+    qos: QoS,
+    retain: bool,
+}
 
 /// Represents the current connection state of the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +114,7 @@ where
     state: ConnectionState,
     last_tx_time: Instant,
     next_packet_id: u16,
+    runtime_will: Option<OwnedLastWill>,
 }
 
 impl<'a, T, const MAX_TOPICS: usize, const BUF_SIZE: usize> MqttClient<'a, T, MAX_TOPICS, BUF_SIZE>
@@ -95,7 +130,31 @@ where
             state: ConnectionState::Disconnected,
             last_tx_time: Instant::now(),
             next_packet_id: 1,
+            runtime_will: None,
         }
+    }
+
+    /// Sets/overrides the Last Will and Testament for the next connections.
+    ///
+    /// Returns `false` when topic or payload exceed internal fixed buffers.
+    pub fn set_last_will(&mut self, will: LastWill<'_>) -> bool {
+        let mut topic: String<MAX_WILL_TOPIC_LEN> = String::new();
+        if topic.push_str(will.topic).is_err() {
+            return false;
+        }
+
+        let mut payload: Vec<u8, MAX_WILL_PAYLOAD_LEN> = Vec::new();
+        if payload.extend_from_slice(will.payload).is_err() {
+            return false;
+        }
+
+        self.runtime_will = Some(OwnedLastWill {
+            topic,
+            payload,
+            qos: will.qos,
+            retain: will.retain,
+        });
+        true
     }
 
     /// Attempts to connect to the MQTT broker.
@@ -107,12 +166,23 @@ where
         esp_println::println!("MQTT: Starting connect...");
 
         self.state = ConnectionState::Connecting;
+        let will = if let Some(will) = self.runtime_will.as_ref() {
+            Some(LastWill {
+                topic: will.topic.as_str(),
+                payload: will.payload.as_slice(),
+                qos: will.qos,
+                retain: will.retain,
+            })
+        } else {
+            self.options.will
+        };
         let connect_packet = Connect::with_credentials(
             self.options.client_id,
             self.options.keep_alive.as_secs() as u16,
             true,
             self.options.username.as_deref(),
             self.options.password.as_ref().map(|s| s.as_bytes()),
+            will,
         );
         let len = connect_packet
             .encode(&mut self.tx_buffer, self.options.version)

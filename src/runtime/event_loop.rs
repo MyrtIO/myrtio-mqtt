@@ -96,6 +96,12 @@ where
     ///
     /// This method runs forever unless an error occurs.
     pub async fn run(&mut self) -> Result<(), MqttError<T::Error>> {
+        if let Some(last_will) = self.module.last_will()
+            && !self.client.set_last_will(last_will)
+        {
+            return Err(MqttError::BufferTooSmall);
+        }
+
         // Connect to the broker
         self.client.connect().await?;
 

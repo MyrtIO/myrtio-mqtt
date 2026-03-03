@@ -79,6 +79,6 @@ pub mod transport;
 pub mod util;
 
 // Re-export key types for easier access at the crate root.
-pub use client::{MqttClient, MqttEvent, MqttOptions};
+pub use client::{LastWill, MqttClient, MqttEvent, MqttOptions};
 pub use packet::QoS;
 pub use transport::TcpTransport;

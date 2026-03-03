@@ -23,6 +23,7 @@
 
 use embassy_time::Duration;
 
+use crate::client::LastWill;
 use crate::packet::Publish;
 use crate::packet::QoS;
 
@@ -168,6 +169,15 @@ pub trait MqttModule {
     /// The default implementation does nothing.
     fn on_start(&mut self, _outbox: &mut dyn PublishOutbox) {}
 
+    /// Returns MQTT Last Will and Testament settings used for broker-side offline detection.
+    ///
+    /// When provided, the runtime configures the client so the broker publishes this
+    /// message if the connection drops unexpectedly (power loss, link loss, crash).
+    /// The default implementation returns no will.
+    fn last_will(&self) -> Option<LastWill<'_>> {
+        None
+    }
+
     /// Check if the module needs to publish immediately after processing a message.
     ///
     /// If this returns `true`, `on_publish` will be called immediately after `on_message`.
@@ -248,6 +258,10 @@ where
         self.second.on_start(outbox);
     }
 
+    fn last_will(&self) -> Option<LastWill<'_>> {
+        self.first.last_will().or_else(|| self.second.last_will())
+    }
+
     fn needs_immediate_publish(&self) -> bool {
         self.first.needs_immediate_publish() || self.second.needs_immediate_publish()
     }
@@ -276,6 +290,10 @@ impl<M: MqttModule + ?Sized> MqttModule for &mut M {
 
     fn on_start(&mut self, outbox: &mut dyn PublishOutbox) {
         (**self).on_start(outbox)
+    }
+
+    fn last_will(&self) -> Option<LastWill<'_>> {
+        (**self).last_will()
     }
 
     fn needs_immediate_publish(&self) -> bool {
